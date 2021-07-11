@@ -5,13 +5,30 @@
 #include <vector>
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
-#include "helpers.h"
 #include "json.hpp"
+#include "path_builder.h"
+#include "car.h"
+#include "predictor.h"
 
 // for convenience
 using nlohmann::json;
 using std::string;
 using std::vector;
+
+// Checks if the SocketIO event has JSON data.
+// If there is data the JSON object in string format will be returned,
+//   else the empty string "" will be returned.
+string hasData(string s) {
+  auto found_null = s.find("null");
+  auto b1 = s.find_first_of("[");
+  auto b2 = s.find_first_of("}");
+  if (found_null != string::npos) {
+    return "";
+  } else if (b1 != string::npos && b2 != string::npos) {
+    return s.substr(b1, b2 - b1 + 2);
+  }
+  return "";
+}
 
 int main() {
   uWS::Hub h;
@@ -49,9 +66,12 @@ int main() {
     map_waypoints_dx.push_back(d_x);
     map_waypoints_dy.push_back(d_y);
   }
+  PathBuilder path_builder{ map_waypoints_s, map_waypoints_x, map_waypoints_y };
+  int target_lane = 1;
+  double ref_vel = 0;
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
-               &map_waypoints_dx,&map_waypoints_dy]
+               &map_waypoints_dx,&map_waypoints_dy, &path_builder, &target_lane, &ref_vel]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -67,40 +87,36 @@ int main() {
         string event = j[0].get<string>();
         
         if (event == "telemetry") {
-          // j[1] is the data JSON object
+          json &data_json = j[1];
           
-          // Main car's localization Data
-          double car_x = j[1]["x"];
-          double car_y = j[1]["y"];
-          double car_s = j[1]["s"];
-          double car_d = j[1]["d"];
-          double car_yaw = j[1]["yaw"];
-          double car_speed = j[1]["speed"];
+          struct EgoCar ego_car;
+          ego_car.x = data_json["x"];
+          ego_car.y = data_json["y"];
+          ego_car.s = data_json["s"];
+          ego_car.d = data_json["d"];
+          ego_car.yaw = data_json["yaw"];
+          ego_car.speed = data_json["speed"];
 
           // Previous path data given to the Planner
-          auto previous_path_x = j[1]["previous_path_x"];
-          auto previous_path_y = j[1]["previous_path_y"];
+          auto previous_path_x = data_json["previous_path_x"];
+          auto previous_path_y = data_json["previous_path_y"];
           // Previous path's end s and d values 
-          double end_path_s = j[1]["end_path_s"];
-          double end_path_d = j[1]["end_path_d"];
+          double end_path_s = data_json["end_path_s"];
+          double end_path_d = data_json["end_path_d"];
 
-          // Sensor Fusion Data, a list of all other cars on the same side 
-          //   of the road.
-          auto sensor_fusion = j[1]["sensor_fusion"];
+          Predictor predictor { target_lane, ego_car, data_json["sensor_fusion"], (int) previous_path_x.size() };
+          LaneAndSpeed best_lane_and_speed = path_builder.get_best_lane_and_speed(predictor, target_lane, ref_vel, ego_car);
+          predictor.clean_state();
+          target_lane = best_lane_and_speed.lane;
+          ref_vel = best_lane_and_speed.speed;
+
+          vector<vector<double>> next_points = path_builder.build_path(
+            previous_path_x, previous_path_y, ego_car, target_lane, ref_vel
+          );
 
           json msgJson;
-
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
-
-          /**
-           * TODO: define a path made up of (x,y) points that the car will visit
-           *   sequentially every .02 seconds
-           */
-
-
-          msgJson["next_x"] = next_x_vals;
-          msgJson["next_y"] = next_y_vals;
+          msgJson["next_x"] = next_points[0];
+          msgJson["next_y"] = next_points[1];
 
           auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
